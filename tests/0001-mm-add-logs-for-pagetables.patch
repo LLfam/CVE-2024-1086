@@ -1,0 +1,151 @@
+From e449dbb06b7bcda7c04744de329dba58496ea62f Mon Sep 17 00:00:00 2001
+From: lei lu <llfamsec@gmail.com>
+Date: Mon, 16 Dec 2024 23:35:56 +0800
+Subject: [PATCH] mm: add logs for pagetables
+
+To better understand the process of creating pagetables.
+
+Signed-off-by: lei lu <llfamsec@gmail.com>
+---
+ include/linux/mm.h |  8 ++++++
+ mm/memory.c        | 65 ++++++++++++++++++++++++++++++++++++++++++++++
+ mm/mempolicy.c     |  8 ++++++
+ 3 files changed, 81 insertions(+)
+
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index 1f79667824eb..c8adfef9e53b 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -2644,6 +2644,14 @@ static inline void pgtable_init(void)
+
+ static inline bool pgtable_pte_page_ctor(struct page *page)
+ {
++       if (strstr(current->comm, "test")) {
++               pr_info("[%s] %s: page: 0x%p " \
++                       "(phys: 0x%llx, vaddr: 0x%p, size: %lu)\n",
++                       current->comm, __func__, page,
++                       ((dma_addr_t)page_to_pfn(page) << PAGE_SHIFT),
++                       page_to_virt(page), page_size(page));
++       }
++
+        if (!ptlock_init(page))
+                return false;
+        __SetPageTable(page);
+diff --git a/mm/memory.c b/mm/memory.c
+index 01a23ad48a04..452c2f5eea20 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -4121,6 +4121,56 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
+        return VM_FAULT_OOM;
+ }
+
++static inline void __do_fault_exit(struct vm_fault *vmf)
++{
++       struct mm_struct *mm = vmf->vma->vm_mm;
++       unsigned long addr = vmf->address;
++       pte_t *pte;
++       struct page *pte_page;
++
++       pgd_t *pgd = pgd_offset(mm, addr);
++       p4d_t *p4d = p4d_offset(pgd, addr);
++       pud_t *pud = pud_offset(p4d, addr);
++       pmd_t *pmd = pmd_offset(pud, addr);
++
++       pte = pte_offset_map(pmd, addr);
++       pte_page = virt_to_page(pte);
++
++       pr_info("[%s] %s: fault vaddr: 0x%lx\n" \
++               "\t- vmf->prealloc_pte: 0x%p\n" \
++               "\t- vmf->pud: 0x%p (pud_val: 0x%lx)\n" \
++               "\t- vmf->pmd: 0x%p (pmd_val: 0x%lx)\n" \
++               "\t- vmf->pte: 0x%p\n" \
++               "\t- vmf->orig_pte/orig_pmd: 0x%lx\n" \
++               "\t- vmf->page_off: %lu\n" \
++               "\t- vmf->page: 0x%p " \
++               "(phys: 0x%llx, vaddr: 0x%p, dirty: %d, size: %lu)\n",
++               current->comm, __func__, addr,
++               vmf->prealloc_pte,
++               vmf->pud, (unsigned long)pud_val(*vmf->pud),
++               vmf->pmd, (unsigned long)pmd_val(*vmf->pmd),
++               vmf->pte,
++               (unsigned long)pte_val(vmf->orig_pte),
++               vmf->pgoff,
++               vmf->page, page_to_phys(vmf->page),
++               page_to_virt(vmf->page), PageDirty(vmf->page),
++               page_size(vmf->page));
++
++       if (vmf->cow_page != NULL) {
++               pr_info("\t- vmf->cow_page: 0x%p" \
++                       "(phys: 0x%llx, vaddr: 0x%p, size: %lu)\n",
++                       vmf->cow_page, page_to_phys(vmf->cow_page),
++                       page_to_virt(vmf->cow_page), page_size(vmf->cow_page));
++       }
++
++       pr_info("\t- pte (found by fault vaddr): 0x%p (pte_val: 0x%lx)\n" \
++               "\t- pte_page: 0x%p " \
++               "(phys: 0x%llx, vaddr: 0x%p, size: %lu)\n",
++               pte, (unsigned long)pte_val(*pte),
++               pte_page, page_to_phys(pte_page),
++               page_to_virt(pte_page), page_size(pte_page));
++}
++
+ /*
+  * The mmap_lock must have been held on entry, and may have been
+  * released depending on flags and vma->vm_ops->fault() return value.
+@@ -4157,6 +4207,9 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
+                            VM_FAULT_DONE_COW)))
+                return ret;
+
++       if (strstr(current->comm, "test"))
++               __do_fault_exit(vmf);
++
+        if (unlikely(PageHWPoison(vmf->page))) {
+                struct page *page = vmf->page;
+                vm_fault_t poisonret = VM_FAULT_HWPOISON;
+@@ -5264,6 +5317,12 @@ int __pud_alloc(struct mm_struct *mm, p4d_t *p4d, unsigned long address)
+        if (!new)
+                return -ENOMEM;
+
++       if (strstr(current->comm, "test")) {
++               pr_info("[%s] %s: pud_t at 0x%p+0x0 for vaddr: 0x%lx\n",
++                       current->comm, __func__,
++                       new, address);
++       }
++
+        spin_lock(&mm->page_table_lock);
+        if (!p4d_present(*p4d)) {
+                mm_inc_nr_puds(mm);
+@@ -5288,6 +5347,12 @@ int __pmd_alloc(struct mm_struct *mm, pud_t *pud, unsigned long address)
+        if (!new)
+                return -ENOMEM;
+
++       if (strstr(current->comm, "test")) {
++               pr_info("[%s] %s: pmd_t at 0x%p+0x0 for vaddr: 0x%lx\n",
++                       current->comm, __func__,
++                       new, address);
++       }
++
+        ptl = pud_lock(mm, pud);
+        if (!pud_present(*pud)) {
+                mm_inc_nr_pmds(mm);
+diff --git a/mm/mempolicy.c b/mm/mempolicy.c
+index 2068b594dc88..85f8744aaa56 100644
+--- a/mm/mempolicy.c
++++ b/mm/mempolicy.c
+@@ -2278,6 +2278,14 @@ struct page *alloc_pages(gfp_t gfp, unsigned order)
+                                policy_node(gfp, pol, numa_node_id()),
+                                policy_nodemask(gfp, pol));
+
++       if (strstr(current->comm, "test")) {
++               pr_info("[%s] %s: allocate order-%d pages " \
++                       "(phys: 0x%llx, vaddr: 0x%p, size: %lu)\n",
++                       current->comm, __func__, order,
++                       ((dma_addr_t)page_to_pfn(page) << PAGE_SHIFT),
++                       page_to_virt(page), page_size(page));
++       }
++
+        return page;
+ }
+ EXPORT_SYMBOL(alloc_pages);
+--
+2.34.1
